@@ -17,11 +17,10 @@
 
 package io.reactiverse.pgclient.impl;
 
-import io.reactiverse.pgclient.impl.codec.decoder.InboundMessage;
 import io.reactiverse.pgclient.impl.codec.decoder.MessageDecoder;
 import io.reactiverse.pgclient.impl.codec.decoder.InitiateSslHandler;
 import io.reactiverse.pgclient.impl.codec.encoder.MessageEncoder;
-import io.reactiverse.pgclient.impl.codec.decoder.message.NotificationResponse;
+import io.reactiverse.pgclient.impl.codec.decoder.NotificationResponse;
 import io.netty.channel.ChannelPipeline;
 import io.netty.handler.codec.DecoderException;
 import io.vertx.core.*;
@@ -93,7 +92,7 @@ public class SocketConnection implements Connection {
   }
 
   private void initiateProtocol(String username, String password, String database, Handler<? super CommandResponse<Connection>> completionHandler) {
-    decoder = new MessageDecoder(inflight, this::handleMessage, socket.channelHandlerContext().alloc());
+    decoder = new MessageDecoder(inflight, this::handleNotification, socket.channelHandlerContext().alloc());
     encoder = new MessageEncoder(socket);
     socket.closeHandler(this::handleClosed);
     socket.exceptionHandler(this::handleException);
@@ -215,21 +214,7 @@ public class SocketConnection implements Connection {
     decoder.channelRead(msg);
   }
 
-  private void handleMessage(InboundMessage msg) {
-    // System.out.println("<-- " + msg);
-    if (msg instanceof NotificationResponse) {
-      handleNotification((NotificationResponse) msg);
-    } else {
-      CommandBase<?> cmd = inflight.peek();
-      if (cmd != null) {
-        cmd.handleMessage(msg);
-      } else {
-        System.out.println("Uh oh, no inflight command for " + msg);
-      }
-    }
-  }
-
-  private void handleNotification(NotificationResponse response) {
+  public void handleNotification(NotificationResponse response) {
     if (holder != null) {
       holder.handleNotification(response.getProcessId(), response.getChannel(), response.getPayload());
     }

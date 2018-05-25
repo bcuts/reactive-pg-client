@@ -24,13 +24,13 @@ import io.reactiverse.pgclient.impl.QueryCommandBase;
 import io.reactiverse.pgclient.impl.codec.ColumnDesc;
 import io.reactiverse.pgclient.impl.codec.DataFormat;
 import io.reactiverse.pgclient.impl.codec.DataType;
-import io.reactiverse.pgclient.impl.codec.decoder.message.*;
+import io.reactiverse.pgclient.impl.codec.TxStatus;
 import io.reactiverse.pgclient.impl.codec.util.Util;
 import io.netty.buffer.ByteBuf;
 import io.netty.util.ByteProcessor;
-import io.reactiverse.pgclient.impl.codec.decoder.message.type.AuthenticationType;
-import io.reactiverse.pgclient.impl.codec.decoder.message.type.ErrorOrNoticeType;
-import io.reactiverse.pgclient.impl.codec.decoder.message.type.MessageType;
+import io.reactiverse.pgclient.impl.codec.decoder.type.AuthenticationType;
+import io.reactiverse.pgclient.impl.codec.decoder.type.ErrorOrNoticeType;
+import io.reactiverse.pgclient.impl.codec.decoder.type.MessageType;
 import io.vertx.core.Handler;
 
 import java.util.Deque;
@@ -45,14 +45,14 @@ import java.util.Deque;
 public class MessageDecoder {
 
   private final Deque<CommandBase<?>> inflight;
-  private final Handler<InboundMessage> handler;
   private final ByteBufAllocator alloc;
+  private final Handler<NotificationResponse> notificationHandler;
 
   private ByteBuf in;
 
-  public MessageDecoder(Deque<CommandBase<?>> inflight, Handler<InboundMessage> handler, ByteBufAllocator alloc) {
+  public MessageDecoder(Deque<CommandBase<?>> inflight, Handler<NotificationResponse> notificationHandler, ByteBufAllocator alloc) {
     this.inflight = inflight;
-    this.handler = handler;
+    this.notificationHandler = notificationHandler;
     this.alloc = alloc;
   }
 
@@ -178,12 +178,12 @@ public class MessageDecoder {
   }
 
   private void decodePortalSuspended() {
-    handler.handle(PortalSuspended.INSTANCE);
+    inflight.peek().handlePortalSuspended();
   }
 
   private void decodeCommandComplete(ByteBuf in) {
     int updated = processor.parse(in);
-    handler.handle(new CommandComplete(updated));
+    inflight.peek().handleCommandComplete(updated);
   }
 
   private void decodeDataRow(ByteBuf in) {
@@ -214,19 +214,34 @@ public class MessageDecoder {
       columns[c] = column;
     }
     RowDescription rowDesc = new RowDescription(columns);
-    handler.handle(rowDesc);
+    inflight.peek().handleRowDescription(rowDesc);
   }
 
+  private static final byte I = (byte) 'I', T = (byte) 'T';
+
   private void decodeReadyForQuery(ByteBuf in) {
-    handler.handle(ReadyForQuery.decode(in.readByte()));
+    byte id = in.readByte();
+    TxStatus txStatus;
+    if (id == I) {
+      txStatus = TxStatus.IDLE;
+    } else if (id == T) {
+      txStatus = TxStatus.ACTIVE;
+    } else {
+      txStatus = TxStatus.FAILED;
+    }
+    inflight.peek().handleReadyForQuery(txStatus);
   }
 
   private void decodeError(ByteBuf in) {
-    decodeErrorOrNotice(ErrorResponse.INSTANCE, in);
+    ErrorResponse response = new ErrorResponse();
+    decodeErrorOrNotice(response, in);
+    inflight.peek().handleErrorResponse(response);
   }
 
   private void decodeNotice(ByteBuf in) {
-    decodeErrorOrNotice(NoticeResponse.INSTANCE, in);
+    NoticeResponse response = new NoticeResponse();
+    decodeErrorOrNotice(response, in);
+    inflight.peek().handleNoticeResponse(response);
   }
 
   private void decodeErrorOrNotice(Response response, ByteBuf in) {
@@ -310,7 +325,6 @@ public class MessageDecoder {
           break;
       }
     }
-    handler.handle(response);
   }
 
   private void decodeAuthentication(ByteBuf in) {
@@ -318,17 +332,17 @@ public class MessageDecoder {
     int type = in.readInt();
     switch (type) {
       case AuthenticationType.OK: {
-        handler.handle(AuthenticationOk.INSTANCE);
+        inflight.peek().handleAuthenticationOk();
       }
       break;
       case AuthenticationType.MD5_PASSWORD: {
         byte[] salt = new byte[4];
         in.readBytes(salt);
-        handler.handle(new AuthenticationMD5Password(salt));
+        inflight.peek().handleAuthenticationMD5Password(salt);
       }
       break;
       case AuthenticationType.CLEARTEXT_PASSWORD: {
-        handler.handle(AuthenticationClearTextPassword.INSTANCE);
+        inflight.peek().handleAuthenticationClearTextPassword();
       }
       break;
       case AuthenticationType.KERBEROS_V5:
@@ -370,19 +384,19 @@ public class MessageDecoder {
   }
 
   private void decodeParseComplete() {
-    handler.handle(ParseComplete.INSTANCE);
+    inflight.peek().handleParseComplete();
   }
 
   private void decodeBindComplete() {
-    handler.handle(BindComplete.INSTANCE);
+    inflight.peek().handleBindComplete();
   }
 
   private void decodeCloseComplete() {
-    handler.handle(CloseComplete.INSTANCE);
+    inflight.peek().handleCloseComplete();
   }
 
   private void decodeNoData() {
-    handler.handle(NoData.INSTANCE);
+    inflight.peek().handleNoData();
   }
 
   private void decodeParameterDescription(ByteBuf in) {
@@ -390,22 +404,26 @@ public class MessageDecoder {
     for (int c = 0; c < paramDataTypes.length; ++c) {
       paramDataTypes[c] = DataType.valueOf(in.readInt());
     }
-    handler.handle(new ParameterDescription(paramDataTypes));
+    inflight.peek().handleParameterDescription(new ParameterDescription(paramDataTypes));
   }
 
   private void decodeParameterStatus(ByteBuf in) {
-    handler.handle(new ParameterStatus(Util.readCStringUTF8(in), Util.readCStringUTF8(in)));
+    String key = Util.readCStringUTF8(in);
+    String value = Util.readCStringUTF8(in);
+    inflight.peek().handleParameterStatus(key, value);
   }
 
   private void decodeEmptyQueryResponse() {
-    handler.handle(EmptyQueryResponse.INSTANCE);
+    inflight.peek().handleEmptyQueryResponse();
   }
 
   private void decodeBackendKeyData(ByteBuf in) {
-    handler.handle(new BackendKeyData(in.readInt(), in.readInt()));
+    int processId = in.readInt();
+    int secretKey = in.readInt();
+    inflight.peek().handleBackendKeyData(processId, secretKey);
   }
 
   private void decodeNotificationResponse(ByteBuf in) {
-    handler.handle(new NotificationResponse(in.readInt(), Util.readCStringUTF8(in), Util.readCStringUTF8(in)));
+    notificationHandler.handle(new NotificationResponse(in.readInt(), Util.readCStringUTF8(in), Util.readCStringUTF8(in)));
   }
 }
